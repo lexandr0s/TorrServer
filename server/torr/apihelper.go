@@ -158,25 +158,50 @@ func SetTorrent(hashHex, title, poster, category string, data string) *Torrent {
 	}
 }
 
+
 func RemTorrent(hashHex string) {
 	if sets.ReadOnly {
 		log.TLogln("API RemTorrent: Read-only DB mode!", hashHex)
 		return
 	}
 	hash := metainfo.NewHashFromHex(hashHex)
-	if bts.RemoveTorrent(hash) {
+	
+	// Получаем торрент ДО удаления, чтобы получить канал closed
+	torr := bts.GetTorrent(hash)
+	if torr == nil {
+		// Если торрента нет в памяти, просто удаляем из БД и файлы
+		RemTorrentDB(hash)
 		if sets.BTsets.UseDisk && hashHex != "" && hashHex != "/" {
 			name := filepath.Join(sets.BTsets.TorrentsSavePath, hashHex)
-			ff, _ := os.ReadDir(name)
-			for _, f := range ff {
-				os.Remove(filepath.Join(name, f.Name()))
-			}
-			err := os.Remove(name)
-			if err != nil {
-				log.TLogln("Error remove cache:", err)
+			os.RemoveAll(name)
+		}
+		return
+	}
+	
+	closedChan := torr.closed
+	
+	// Удаляем из памяти
+	if bts.RemoveTorrent(hash) {
+		// Ждем подтверждения от библиотеки через канал closed
+		select {
+		case <-closedChan:
+			// Библиотека подтвердила закрытие
+			log.TLogln("Torrent closed by library:", hashHex)
+		case <-time.After(5 * time.Second):
+			log.TLogln("Warning: timeout waiting for torrent close:", hashHex)
+		}
+		
+		// Теперь безопасно удаляем файлы с диска
+		if sets.BTsets.UseDisk && hashHex != "" && hashHex != "/" {
+			name := filepath.Join(sets.BTsets.TorrentsSavePath, hashHex)
+			if _, err := os.Stat(name); err == nil {
+				log.TLogln("Removing cache files for:", hashHex)
+				os.RemoveAll(name)
 			}
 		}
 	}
+	
+	// Удаляем из базы данных
 	RemTorrentDB(hash)
 }
 
